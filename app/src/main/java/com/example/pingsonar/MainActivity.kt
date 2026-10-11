@@ -17,7 +17,6 @@ import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import com.hoho.android.usbserial.driver.CdcAcmSerialDriver
 import com.hoho.android.usbserial.driver.Ch34xSerialDriver
 import com.hoho.android.usbserial.driver.Cp21xxSerialDriver
 import com.hoho.android.usbserial.driver.FtdiSerialDriver
@@ -112,7 +111,6 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
     private fun getCustomProber(): UsbSerialProber {
         val customTable = ProbeTable().apply {
-            // Standar vendor ID FTDI & converter serial umum
             addProduct(0x0403, 0x6001, FtdiSerialDriver::class.java)
             addProduct(0x0403, 0x6010, FtdiSerialDriver::class.java)
             addProduct(0x0403, 0x6011, FtdiSerialDriver::class.java)
@@ -129,7 +127,6 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     private fun initiateConnection() {
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         
-        // Coba prober standar, jika kosong gunakan custom table
         var drivers: List<UsbSerialDriver> = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
         if (drivers.isEmpty()) {
             drivers = getCustomProber().findAllDrivers(usbManager)
@@ -168,7 +165,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
         val connection = usbManager.openDevice(driver.device)
 
         if (connection == null) {
-            tvStatus.text = "Status: Gagal membuka koneksi USB (izin ditolak OS)"
+            tvStatus.text = "Status: Gagal membuka koneksi USB"
             return
         }
 
