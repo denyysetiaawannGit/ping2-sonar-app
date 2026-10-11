@@ -15,6 +15,7 @@ import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
@@ -33,7 +34,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     private lateinit var tvStatus: TextView
     private lateinit var spinnerBaudRate: Spinner
     private lateinit var btnConnect: Button
-    private lateinit var chartView: SimpleDepthChartView
+    private var chartView: SimpleDepthChartView? = null
 
     private val baudRates = arrayOf(115200, 9600, 19200, 38400, 57600, 230400, 460800, 921600)
     private val handler = Handler(Looper.getMainLooper())
@@ -41,7 +42,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     private val pollRunnable = object : Runnable {
         override fun run() {
             sendPingRequest()
-            handler.postDelayed(this, 150) // Polling data tiap 150 ms (~6 Hz)
+            handler.postDelayed(this, 150)
         }
     }
 
@@ -59,7 +60,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
                         device?.let { openSerialPort(it) }
                     } else {
-                        tvStatus.text = "Status: Izin USB ditolak pengguna"
+                        tvStatus.text = "Status: Izin USB ditolak"
                     }
                 }
             }
@@ -79,63 +80,88 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, baudRates)
         spinnerBaudRate.adapter = adapter
-        spinnerBaudRate.setSelection(0) // Default 115200
+        spinnerBaudRate.setSelection(0)
 
         btnConnect.setOnClickListener {
-            if (usbSerialPort == null) {
-                initiateConnection()
-            } else {
-                disconnectUsb()
+            try {
+                if (usbSerialPort == null) {
+                    initiateConnection()
+                } else {
+                    disconnectUsb()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                tvStatus.text = "Error: ${e.message}"
             }
         }
 
+        val filter = IntentFilter(actionUsbPermission)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(usbReceiver, IntentFilter(actionUsbPermission), RECEIVER_NOT_EXPORTED)
+            registerReceiver(usbReceiver, filter, RECEIVER_EXPORTED)
         } else {
-            registerReceiver(usbReceiver, IntentFilter(actionUsbPermission))
+            registerReceiver(usbReceiver, filter)
         }
     }
 
     private fun initiateConnection() {
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-        val drivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
-        if (drivers.isEmpty()) {
-            tvStatus.text = "Status: FTDI tidak terdeteksi. Cek OTG."
+        val availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
+        
+        if (availableDrivers.isEmpty()) {
+            tvStatus.text = "Status: Modul FTDI tidak terdeteksi (periksa OTG)"
+            Toast.makeText(this, "Perangkat FTDI tidak ditemukan", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val driver = drivers[0]
-        if (!usbManager.hasPermission(driver.device)) {
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_MUTABLE else 0
+        val driver = availableDrivers[0]
+        val device = driver.device
+
+        if (!usbManager.hasPermission(device)) {
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
             val permissionIntent = PendingIntent.getBroadcast(this, 0, Intent(actionUsbPermission), flags)
-            usbManager.requestPermission(driver.device, permissionIntent)
+            usbManager.requestPermission(device, permissionIntent)
         } else {
-            openSerialPort(driver.device)
+            openSerialPort(device)
         }
     }
 
     private fun openSerialPort(device: UsbDevice) {
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-        val drivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
-        val driver = drivers.firstOrNull { it.device == device } ?: return
-        val connection = usbManager.openDevice(driver.device) ?: return
+        val availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
+        val driver = availableDrivers.firstOrNull { it.device == device } ?: return
+        
+        val connection = usbManager.openDevice(driver.device)
+        if (connection == null) {
+            tvStatus.text = "Status: Gagal membuka koneksi USB"
+            return
+        }
 
-        val port = driver.ports[0]
         try {
+            val port = driver.ports[0]
             port.open(connection)
+            
             val selectedBaud = spinnerBaudRate.selectedItem as Int
             port.setParameters(selectedBaud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            port.dtr = true
+            
+            try {
+                port.dtr = true
+                port.rts = true
+            } catch (_: Exception) {}
 
             ioManager = SerialInputOutputManager(port, this)
             Executors.newSingleThreadExecutor().submit(ioManager)
 
             usbSerialPort = port
-            tvStatus.text = "Status: Terhubung (${driver.device.deviceName}) @ $selectedBaud bps"
+            tvStatus.text = "Status: Terhubung @ $selectedBaud bps"
             btnConnect.text = "Disconnect"
             handler.post(pollRunnable)
-        } catch (e: IOException) {
-            tvStatus.text = "Status: Gagal membuka port (${e.message})"
+        } catch (e: Exception) {
+            tvStatus.text = "Status: Gagal inisialisasi port (${e.message})"
+            Toast.makeText(this, "Gagal konek: ${e.message}", Toast.LENGTH_SHORT).show()
             disconnectUsb()
         }
     }
@@ -143,7 +169,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     private fun sendPingRequest() {
         try {
             usbSerialPort?.write(PingProtocol.REQUEST_DISTANCE_SIMPLE, 100)
-        } catch (_: IOException) {}
+        } catch (_: Exception) {}
     }
 
     override fun onNewData(data: ByteArray?) {
@@ -153,7 +179,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                 runOnUiThread {
                     tvDepth.text = String.format("%.2f m", depthM)
                     tvConfidence.text = "Confidence: $confidence %"
-                    chartView.addDepth(depthM)
+                    chartView?.addDepth(depthM)
                 }
             }
         }
@@ -161,7 +187,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
     override fun onRunError(e: Exception?) {
         runOnUiThread {
-            tvStatus.text = "Status: Koneksi terputus"
+            tvStatus.text = "Status: Komunikasi terputus"
             disconnectUsb()
         }
     }
@@ -174,7 +200,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
         try {
             usbSerialPort?.close()
-        } catch (_: IOException) {}
+        } catch (_: Exception) {}
         usbSerialPort = null
 
         tvStatus.text = "Status: Disconnected"
@@ -184,6 +210,8 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     override fun onDestroy() {
         super.onDestroy()
         disconnectUsb()
-        unregisterReceiver(usbReceiver)
+        try {
+            unregisterReceiver(usbReceiver)
+        } catch (_: Exception) {}
     }
 }
