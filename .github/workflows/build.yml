@@ -30,18 +30,11 @@ jobs:
     - name: Build Debug APK
       run: gradle assembleDebug --stacktrace
 
-    - name: Cari File APK
-      run: |
-        find app/build/outputs/apk/ -name "*.apk" -type f
-
     - name: Upload APK ke Releases
       uses: softprops/action-gh-release@v2
       with:
-- name: Upload APK ke Releases
-  uses: softprops/action-gh-release@v2
-  with:
-    tag_name: v1.1.0
-    name: Ping Sonar App v1.1.0
-    files: app/build/outputs/apk/debug/app-debug.apk
-  env:
-    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        tag_name: v1.1.0
+        name: Ping Sonar App v1.1.0
+        files: app/build/outputs/apk/debug/app-debug.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
