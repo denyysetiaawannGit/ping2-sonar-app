@@ -42,6 +42,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     private lateinit var btnConnect: Button
     private var chartView: SimpleDepthChartView? = null
 
+    private val rxBuffer = mutableListOf<Byte>()
     private val baudRates = arrayOf(115200, 9600, 19200, 38400, 57600, 230400, 460800, 921600)
     private val handler = Handler(Looper.getMainLooper())
 
@@ -86,7 +87,6 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, baudRates)
         spinnerBaudRate.adapter = adapter
-        // Default ke 115200 (baud rate standar Ping2 echosounder)
         spinnerBaudRate.setSelection(0)
 
         btnConnect.setOnClickListener {
@@ -143,7 +143,6 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
         val device = driver.device
 
         if (!usbManager.hasPermission(device)) {
-            // Perbaikan Android 14 (API 34): Intent harus eksplisit dengan setPackage
             val permissionIntent = Intent(actionUsbPermission).apply {
                 `package` = packageName
             }
@@ -188,6 +187,10 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                 port.rts = true
             } catch (_: Exception) {}
 
+            synchronized(rxBuffer) {
+                rxBuffer.clear()
+            }
+
             ioManager = SerialInputOutputManager(port, this)
             Executors.newSingleThreadExecutor().submit(ioManager)
 
@@ -209,12 +212,24 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
     override fun onNewData(data: ByteArray?) {
         data?.let { bytes ->
-            val result = PingProtocol.parseDistanceSimple(bytes, bytes.size)
-            result?.let { (depthM, confidence) ->
-                runOnUiThread {
-                    tvDepth.text = String.format("%.2f m", depthM)
-                    tvConfidence.text = "Confidence: $confidence %"
-                    chartView?.addDepth(depthM)
+            synchronized(rxBuffer) {
+                for (b in bytes) {
+                    rxBuffer.add(b)
+                }
+
+                val result = PingProtocol.parseBuffer(rxBuffer)
+                if (result != null) {
+                    val depthM = result.first
+                    val confidence = result.second
+                    runOnUiThread {
+                        tvDepth.text = String.format("%.2f m", depthM)
+                        tvConfidence.text = "Confidence: $confidence %"
+                        chartView?.addDepth(depthM)
+                    }
+                }
+
+                if (rxBuffer.size > 2048) {
+                    rxBuffer.clear()
                 }
             }
         }
@@ -237,6 +252,10 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
             usbSerialPort?.close()
         } catch (_: IOException) {}
         usbSerialPort = null
+
+        synchronized(rxBuffer) {
+            rxBuffer.clear()
+        }
 
         tvStatus.text = "Status: Disconnected"
         btnConnect.text = "Connect"
