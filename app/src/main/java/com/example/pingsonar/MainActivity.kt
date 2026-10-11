@@ -66,7 +66,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
                         device?.let { openSerialPort(it) }
                     } else {
-                        tvStatus.text = "Status: Izin USB ditolak"
+                        tvStatus.text = "Status: Izin USB ditolak oleh sistem"
                     }
                 }
             }
@@ -86,6 +86,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, baudRates)
         spinnerBaudRate.adapter = adapter
+        // Default ke 115200 (baud rate standar Ping2 echosounder)
         spinnerBaudRate.setSelection(0)
 
         btnConnect.setOnClickListener {
@@ -133,7 +134,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
         }
 
         if (drivers.isEmpty()) {
-            tvStatus.text = "Status: Chip serial tidak terdeteksi prober"
+            tvStatus.text = "Status: Perangkat USB serial tidak ditemukan"
             Toast.makeText(this, "Perangkat USB tidak ditemukan", Toast.LENGTH_SHORT).show()
             return
         }
@@ -142,13 +143,19 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
         val device = driver.device
 
         if (!usbManager.hasPermission(device)) {
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Perbaikan Android 14 (API 34): Intent harus eksplisit dengan setPackage
+            val permissionIntent = Intent(actionUsbPermission).apply {
+                `package` = packageName
+            }
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             } else {
                 PendingIntent.FLAG_UPDATE_CURRENT
             }
-            val permissionIntent = PendingIntent.getBroadcast(this, 0, Intent(actionUsbPermission), flags)
-            usbManager.requestPermission(device, permissionIntent)
+            val pIntent = PendingIntent.getBroadcast(this, 0, permissionIntent, flags)
+            usbManager.requestPermission(device, pIntent)
         } else {
             openSerialPort(device)
         }
