@@ -5,6 +5,9 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,8 +30,15 @@ jobs:
     - name: Build Debug APK
       run: gradle assembleDebug --stacktrace
 
-    - name: Upload APK Artifact
-      uses: actions/upload-artifact@v4
+    - name: Cari File APK
+      run: |
+        find app/build/outputs/apk/ -name "*.apk" -type f
+
+    - name: Upload APK ke Releases
+      uses: softprops/action-gh-release@v2
       with:
-        name: PingSonar-Debug-APK
-        path: app/build/outputs/apk/debug/app-debug.apk
+        tag_name: v1.0.0
+        name: Ping Sonar App v1.0.0
+        files: app/build/outputs/apk/debug/app-debug.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
