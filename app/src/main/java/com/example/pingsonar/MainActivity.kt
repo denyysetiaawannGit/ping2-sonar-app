@@ -17,6 +17,13 @@ import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.hoho.android.usbserial.driver.CdcAcmSerialDriver
+import com.hoho.android.usbserial.driver.Ch34xSerialDriver
+import com.hoho.android.usbserial.driver.Cp21xxSerialDriver
+import com.hoho.android.usbserial.driver.FtdiSerialDriver
+import com.hoho.android.usbserial.driver.ProbeTable
+import com.hoho.android.usbserial.driver.ProlificSerialDriver
+import com.hoho.android.usbserial.driver.UsbSerialDriver
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import com.hoho.android.usbserial.util.SerialInputOutputManager
@@ -90,8 +97,8 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                     disconnectUsb()
                 }
             } catch (e: Exception) {
-                Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
                 tvStatus.text = "Error: ${e.message}"
+                Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
 
@@ -103,17 +110,38 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
         }
     }
 
+    private fun getCustomProber(): UsbSerialProber {
+        val customTable = ProbeTable().apply {
+            // Standar vendor ID FTDI & converter serial umum
+            addProduct(0x0403, 0x6001, FtdiSerialDriver::class.java)
+            addProduct(0x0403, 0x6010, FtdiSerialDriver::class.java)
+            addProduct(0x0403, 0x6011, FtdiSerialDriver::class.java)
+            addProduct(0x0403, 0x6014, FtdiSerialDriver::class.java)
+            addProduct(0x0403, 0x6015, FtdiSerialDriver::class.java)
+            addProduct(0x10C4, 0xEA60, Cp21xxSerialDriver::class.java)
+            addProduct(0x1A86, 0x7523, Ch34xSerialDriver::class.java)
+            addProduct(0x1A86, 0x5523, Ch34xSerialDriver::class.java)
+            addProduct(0x067B, 0x2303, ProlificSerialDriver::class.java)
+        }
+        return UsbSerialProber(customTable)
+    }
+
     private fun initiateConnection() {
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-        val availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
         
-        if (availableDrivers.isEmpty()) {
-            tvStatus.text = "Status: Modul FTDI tidak terdeteksi (periksa OTG)"
-            Toast.makeText(this, "Perangkat FTDI tidak ditemukan", Toast.LENGTH_SHORT).show()
+        // Coba prober standar, jika kosong gunakan custom table
+        var drivers: List<UsbSerialDriver> = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
+        if (drivers.isEmpty()) {
+            drivers = getCustomProber().findAllDrivers(usbManager)
+        }
+
+        if (drivers.isEmpty()) {
+            tvStatus.text = "Status: Chip serial tidak terdeteksi prober"
+            Toast.makeText(this, "Perangkat USB tidak ditemukan", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val driver = availableDrivers[0]
+        val driver = drivers[0]
         val device = driver.device
 
         if (!usbManager.hasPermission(device)) {
@@ -131,22 +159,26 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
     private fun openSerialPort(device: UsbDevice) {
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-        val availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
-        val driver = availableDrivers.firstOrNull { it.device == device } ?: return
-        
+        var drivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
+        if (drivers.isEmpty()) {
+            drivers = getCustomProber().findAllDrivers(usbManager)
+        }
+
+        val driver = drivers.firstOrNull { it.device == device } ?: return
         val connection = usbManager.openDevice(driver.device)
+
         if (connection == null) {
-            tvStatus.text = "Status: Gagal membuka koneksi USB"
+            tvStatus.text = "Status: Gagal membuka koneksi USB (izin ditolak OS)"
             return
         }
 
         try {
             val port = driver.ports[0]
             port.open(connection)
-            
+
             val selectedBaud = spinnerBaudRate.selectedItem as Int
             port.setParameters(selectedBaud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            
+
             try {
                 port.dtr = true
                 port.rts = true
@@ -161,7 +193,6 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
             handler.post(pollRunnable)
         } catch (e: Exception) {
             tvStatus.text = "Status: Gagal inisialisasi port (${e.message})"
-            Toast.makeText(this, "Gagal konek: ${e.message}", Toast.LENGTH_SHORT).show()
             disconnectUsb()
         }
     }
@@ -169,7 +200,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     private fun sendPingRequest() {
         try {
             usbSerialPort?.write(PingProtocol.REQUEST_DISTANCE_SIMPLE, 100)
-        } catch (_: Exception) {}
+        } catch (_: IOException) {}
     }
 
     override fun onNewData(data: ByteArray?) {
@@ -200,7 +231,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
         try {
             usbSerialPort?.close()
-        } catch (_: Exception) {}
+        } catch (_: IOException) {}
         usbSerialPort = null
 
         tvStatus.text = "Status: Disconnected"
