@@ -47,10 +47,14 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     private val baudRates = arrayOf(115200, 9600, 19200, 38400, 57600, 230400, 460800, 921600)
     private val handler = Handler(Looper.getMainLooper())
 
+    private var isStreamingActive = false
+
     private val pollRunnable = object : Runnable {
         override fun run() {
-            sendTrigger()
-            handler.postDelayed(this, 150)
+            if (!isStreamingActive && usbSerialPort != null) {
+                sendTrigger()
+                handler.postDelayed(this, 300) // Interval polling lebih santai agar port tidak jenuh
+            }
         }
     }
 
@@ -68,7 +72,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
                         device?.let { openSerialPort(it) }
                     } else {
-                        tvStatus.text = "Status: Izin USB ditolak oleh sistem"
+                        tvStatus.text = "Status: Izin USB ditolak"
                     }
                 }
             }
@@ -135,7 +139,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
         }
 
         if (drivers.isEmpty()) {
-            tvStatus.text = "Status: Perangkat USB serial tidak ditemukan"
+            tvStatus.text = "Status: USB Serial tidak ditemukan"
             Toast.makeText(this, "Perangkat USB tidak ditemukan", Toast.LENGTH_SHORT).show()
             return
         }
@@ -172,7 +176,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
         val connection = usbManager.openDevice(driver.device)
 
         if (connection == null) {
-            tvStatus.text = "Status: Gagal membuka koneksi USB"
+            tvStatus.text = "Status: Gagal membuka port USB"
             return
         }
 
@@ -191,27 +195,28 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                 rxBuffer.clear()
             }
             totalBytesReceived = 0L
+            isStreamingActive = false
 
             ioManager = SerialInputOutputManager(port, this)
             Executors.newSingleThreadExecutor().submit(ioManager)
 
             usbSerialPort = port
-            tvStatus.text = "Status: Terhubung @ $selectedBaud bps (Inisialisasi...)"
+            tvStatus.text = "Status: Terhubung @ $selectedBaud bps"
             btnConnect.text = "Disconnect"
 
-            // Kirim perintah start stream (ID 1003) berkala diawal untuk membangunkan sensor
+            // Pancing start stream continuous bawaan Ping2
             Executors.newSingleThreadExecutor().execute {
                 try {
                     val cmdStart = PingProtocol.getContinuousStartPacket()
                     port.write(cmdStart, 200)
-                    Thread.sleep(50)
+                    Thread.sleep(100)
                     port.write(cmdStart, 200)
                 } catch (_: Exception) {}
             }
 
-            handler.post(pollRunnable)
+            handler.postDelayed(pollRunnable, 500)
         } catch (e: Exception) {
-            tvStatus.text = "Status: Gagal inisialisasi port (${e.message})"
+            tvStatus.text = "Status: Gagal inisialisasi (${e.message})"
             disconnectUsb()
         }
     }
@@ -219,10 +224,9 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     private fun sendTrigger() {
         val port = usbSerialPort ?: return
         try {
-            // Polling terus-menerus meminta ID 1212
             val reqPacket = PingProtocol.getPollDistanceSimplePacket()
-            port.write(reqPacket, 100)
-        } catch (_: IOException) {}
+            port.write(reqPacket, 150)
+        } catch (_: Exception) {}
     }
 
     override fun onNewData(data: ByteArray?) {
@@ -237,20 +241,25 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                 if (result != null) {
                     val depthM = result.first
                     val confidence = result.second
+
+                    if (!isStreamingActive) {
+                        isStreamingActive = true
+                        handler.removeCallbacks(pollRunnable)
+                    }
+
                     runOnUiThread {
                         tvDepth.text = String.format("%.2f m", depthM)
                         tvConfidence.text = "Confidence: $confidence %"
-                        tvStatus.text = "Status: Aktif (${totalBytesReceived} bytes)"
+                        tvStatus.text = "Status: Aktif (${totalBytesReceived} B)"
                         chartView?.addDepth(depthM)
                     }
                 } else {
                     runOnUiThread {
-                        tvStatus.text = "Status: Rx ${totalBytesReceived} bytes (buffer:${rxBuffer.size})"
+                        tvStatus.text = "Status: Rx ${totalBytesReceived} B (buf:${rxBuffer.size})"
                     }
                 }
 
-                // Batasi memori buffer jika terjadi overflow
-                if (rxBuffer.size > 4096) {
+                if (rxBuffer.size > 2048) {
                     rxBuffer.clear()
                 }
             }
@@ -258,6 +267,10 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     }
 
     override fun onRunError(e: Exception?) {
+        // Abaikan error timeout biasa agar tidak putus sepihak saat transfer padat
+        if (e is IOException && e.message?.contains("timeout", ignoreCase = true) == true) {
+            return
+        }
         runOnUiThread {
             tvStatus.text = "Status: Komunikasi terputus"
             disconnectUsb()
@@ -265,6 +278,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     }
 
     private fun disconnectUsb() {
+        isStreamingActive = false
         handler.removeCallbacks(pollRunnable)
         ioManager?.listener = null
         ioManager?.stop()
