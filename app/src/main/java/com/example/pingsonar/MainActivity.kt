@@ -43,13 +43,15 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     private var chartView: SimpleDepthChartView? = null
 
     private val rxBuffer = mutableListOf<Byte>()
+    private var totalBytesReceived = 0L
     private val baudRates = arrayOf(115200, 9600, 19200, 38400, 57600, 230400, 460800, 921600)
     private val handler = Handler(Looper.getMainLooper())
 
+    // Polling berkala jika auto-stream belum aktif
     private val pollRunnable = object : Runnable {
         override fun run() {
             sendPingRequest()
-            handler.postDelayed(this, 150)
+            handler.postDelayed(this, 200)
         }
     }
 
@@ -87,7 +89,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, baudRates)
         spinnerBaudRate.adapter = adapter
-        spinnerBaudRate.setSelection(0)
+        spinnerBaudRate.setSelection(0) // Default 115200
 
         btnConnect.setOnClickListener {
             try {
@@ -127,7 +129,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
     private fun initiateConnection() {
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-        
+
         var drivers: List<UsbSerialDriver> = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
         if (drivers.isEmpty()) {
             drivers = getCustomProber().findAllDrivers(usbManager)
@@ -182,26 +184,42 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
             val selectedBaud = spinnerBaudRate.selectedItem as Int
             port.setParameters(selectedBaud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
 
-            try {
-                port.dtr = true
-                port.rts = true
-            } catch (_: Exception) {}
-
             synchronized(rxBuffer) {
                 rxBuffer.clear()
             }
+            totalBytesReceived = 0L
 
             ioManager = SerialInputOutputManager(port, this)
             Executors.newSingleThreadExecutor().submit(ioManager)
 
             usbSerialPort = port
-            tvStatus.text = "Status: Terhubung @ $selectedBaud bps"
+            tvStatus.text = "Status: Terhubung @ $selectedBaud bps (Menunggu data...)"
             btnConnect.text = "Disconnect"
+
+            // Kirim perintah aktifkan continuous stream pesan 1212 setiap 100ms
+            enableContinuousStream()
+
+            // Jalankan polling cadangan
             handler.post(pollRunnable)
         } catch (e: Exception) {
             tvStatus.text = "Status: Gagal inisialisasi port (${e.message})"
             disconnectUsb()
         }
+    }
+
+    // Ping Protocol Msg ID 1003 (control_continuous_start): Minta ID 1212 dikirim otomatis
+    private fun enableContinuousStream() {
+        val startStreamPacket = byteArrayOf(
+            0x42, 0x52,             // 'B', 'R'
+            0x02, 0x00,             // Payload len: 2 bytes
+            0xEB.toByte(), 0x03,   // Msg ID: 1003 (0x03EB little-endian)
+            0x00, 0x00,             // Src, Dst
+            0xBC.toByte(), 0x04,   // Target Msg ID: 1212
+            0x10, 0x01             // Checksum
+        )
+        try {
+            usbSerialPort?.write(startStreamPacket, 100)
+        } catch (_: IOException) {}
     }
 
     private fun sendPingRequest() {
@@ -213,6 +231,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     override fun onNewData(data: ByteArray?) {
         data?.let { bytes ->
             synchronized(rxBuffer) {
+                totalBytesReceived += bytes.size
                 for (b in bytes) {
                     rxBuffer.add(b)
                 }
@@ -224,7 +243,13 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                     runOnUiThread {
                         tvDepth.text = String.format("%.2f m", depthM)
                         tvConfidence.text = "Confidence: $confidence %"
+                        tvStatus.text = "Status: Menerima data (${totalBytesReceived} bytes)"
                         chartView?.addDepth(depthM)
+                    }
+                } else {
+                    // Update byte counter agar terlihat jika sinyal fisik masuk
+                    runOnUiThread {
+                        tvStatus.text = "Status: Rx ${totalBytesReceived} bytes (buffer:${rxBuffer.size})"
                     }
                 }
 
