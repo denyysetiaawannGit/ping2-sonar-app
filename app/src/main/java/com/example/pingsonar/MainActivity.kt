@@ -47,11 +47,10 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     private val baudRates = arrayOf(115200, 9600, 19200, 38400, 57600, 230400, 460800, 921600)
     private val handler = Handler(Looper.getMainLooper())
 
-    // Polling berkala jika auto-stream belum aktif
     private val pollRunnable = object : Runnable {
         override fun run() {
-            sendPingRequest()
-            handler.postDelayed(this, 200)
+            sendTrigger()
+            handler.postDelayed(this, 150)
         }
     }
 
@@ -89,7 +88,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
 
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, baudRates)
         spinnerBaudRate.adapter = adapter
-        spinnerBaudRate.setSelection(0) // Default 115200
+        spinnerBaudRate.setSelection(0)
 
         btnConnect.setOnClickListener {
             try {
@@ -184,6 +183,10 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
             val selectedBaud = spinnerBaudRate.selectedItem as Int
             port.setParameters(selectedBaud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
 
+            try {
+                port.purgeHwBuffers(true, true)
+            } catch (_: Exception) {}
+
             synchronized(rxBuffer) {
                 rxBuffer.clear()
             }
@@ -193,13 +196,19 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
             Executors.newSingleThreadExecutor().submit(ioManager)
 
             usbSerialPort = port
-            tvStatus.text = "Status: Terhubung @ $selectedBaud bps (Menunggu data...)"
+            tvStatus.text = "Status: Terhubung @ $selectedBaud bps (Inisialisasi...)"
             btnConnect.text = "Disconnect"
 
-            // Kirim perintah aktifkan continuous stream pesan 1212 setiap 100ms
-            enableContinuousStream()
+            // Kirim perintah start stream (ID 1003) berkala diawal untuk membangunkan sensor
+            Executors.newSingleThreadExecutor().execute {
+                try {
+                    val cmdStart = PingProtocol.getContinuousStartPacket()
+                    port.write(cmdStart, 200)
+                    Thread.sleep(50)
+                    port.write(cmdStart, 200)
+                } catch (_: Exception) {}
+            }
 
-            // Jalankan polling cadangan
             handler.post(pollRunnable)
         } catch (e: Exception) {
             tvStatus.text = "Status: Gagal inisialisasi port (${e.message})"
@@ -207,24 +216,12 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
         }
     }
 
-    // Ping Protocol Msg ID 1003 (control_continuous_start): Minta ID 1212 dikirim otomatis
-    private fun enableContinuousStream() {
-        val startStreamPacket = byteArrayOf(
-            0x42, 0x52,             // 'B', 'R'
-            0x02, 0x00,             // Payload len: 2 bytes
-            0xEB.toByte(), 0x03,   // Msg ID: 1003 (0x03EB little-endian)
-            0x00, 0x00,             // Src, Dst
-            0xBC.toByte(), 0x04,   // Target Msg ID: 1212
-            0x10, 0x01             // Checksum
-        )
+    private fun sendTrigger() {
+        val port = usbSerialPort ?: return
         try {
-            usbSerialPort?.write(startStreamPacket, 100)
-        } catch (_: IOException) {}
-    }
-
-    private fun sendPingRequest() {
-        try {
-            usbSerialPort?.write(PingProtocol.REQUEST_DISTANCE_SIMPLE, 100)
+            // Polling terus-menerus meminta ID 1212
+            val reqPacket = PingProtocol.getPollDistanceSimplePacket()
+            port.write(reqPacket, 100)
         } catch (_: IOException) {}
     }
 
@@ -243,17 +240,17 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                     runOnUiThread {
                         tvDepth.text = String.format("%.2f m", depthM)
                         tvConfidence.text = "Confidence: $confidence %"
-                        tvStatus.text = "Status: Menerima data (${totalBytesReceived} bytes)"
+                        tvStatus.text = "Status: Aktif (${totalBytesReceived} bytes)"
                         chartView?.addDepth(depthM)
                     }
                 } else {
-                    // Update byte counter agar terlihat jika sinyal fisik masuk
                     runOnUiThread {
                         tvStatus.text = "Status: Rx ${totalBytesReceived} bytes (buffer:${rxBuffer.size})"
                     }
                 }
 
-                if (rxBuffer.size > 2048) {
+                // Batasi memori buffer jika terjadi overflow
+                if (rxBuffer.size > 4096) {
                     rxBuffer.clear()
                 }
             }
