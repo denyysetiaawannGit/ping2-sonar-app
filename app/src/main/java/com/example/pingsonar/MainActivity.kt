@@ -47,13 +47,12 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     private val baudRates = arrayOf(115200, 9600, 19200, 38400, 57600, 230400, 460800, 921600)
     private val handler = Handler(Looper.getMainLooper())
 
-    private var isStreamingActive = false
-
+    // Polling loop terus berjalan setiap 120 ms (~8 Hz) agar pembacaan dinamis
     private val pollRunnable = object : Runnable {
         override fun run() {
-            if (!isStreamingActive && usbSerialPort != null) {
+            if (usbSerialPort != null) {
                 sendTrigger()
-                handler.postDelayed(this, 300) // Interval polling lebih santai agar port tidak jenuh
+                handler.postDelayed(this, 120)
             }
         }
     }
@@ -195,7 +194,6 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                 rxBuffer.clear()
             }
             totalBytesReceived = 0L
-            isStreamingActive = false
 
             ioManager = SerialInputOutputManager(port, this)
             Executors.newSingleThreadExecutor().submit(ioManager)
@@ -204,17 +202,8 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
             tvStatus.text = "Status: Terhubung @ $selectedBaud bps"
             btnConnect.text = "Disconnect"
 
-            // Pancing start stream continuous bawaan Ping2
-            Executors.newSingleThreadExecutor().execute {
-                try {
-                    val cmdStart = PingProtocol.getContinuousStartPacket()
-                    port.write(cmdStart, 200)
-                    Thread.sleep(100)
-                    port.write(cmdStart, 200)
-                } catch (_: Exception) {}
-            }
-
-            handler.postDelayed(pollRunnable, 500)
+            // Mulai polling terus menerus
+            handler.post(pollRunnable)
         } catch (e: Exception) {
             tvStatus.text = "Status: Gagal inisialisasi (${e.message})"
             disconnectUsb()
@@ -225,7 +214,7 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
         val port = usbSerialPort ?: return
         try {
             val reqPacket = PingProtocol.getPollDistanceSimplePacket()
-            port.write(reqPacket, 150)
+            port.write(reqPacket, 100)
         } catch (_: Exception) {}
     }
 
@@ -241,11 +230,6 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
                 if (result != null) {
                     val depthM = result.first
                     val confidence = result.second
-
-                    if (!isStreamingActive) {
-                        isStreamingActive = true
-                        handler.removeCallbacks(pollRunnable)
-                    }
 
                     runOnUiThread {
                         tvDepth.text = String.format("%.2f m", depthM)
@@ -267,7 +251,6 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     }
 
     override fun onRunError(e: Exception?) {
-        // Abaikan error timeout biasa agar tidak putus sepihak saat transfer padat
         if (e is IOException && e.message?.contains("timeout", ignoreCase = true) == true) {
             return
         }
@@ -278,7 +261,6 @@ class MainActivity : AppCompatActivity(), SerialInputOutputManager.Listener {
     }
 
     private fun disconnectUsb() {
-        isStreamingActive = false
         handler.removeCallbacks(pollRunnable)
         ioManager?.listener = null
         ioManager?.stop()
