@@ -5,56 +5,55 @@ import java.nio.ByteOrder
 
 object PingProtocol {
 
+    var lastDebugMsg: String = ""
+
     fun createPacket(msgId: Int, payload: ByteArray = ByteArray(0)): ByteArray {
         val payloadLen = payload.size
-        val packetLen = 8 + payloadLen + 2
-        val buffer = ByteBuffer.allocate(packetLen).order(ByteOrder.LITTLE_ENDIAN)
+        val totalLen = 8 + payloadLen + 2
+        val packet = ByteArray(totalLen)
 
-        buffer.put(0x42.toByte()) // 'B'
-        buffer.put(0x52.toByte()) // 'R'
-        buffer.putShort(payloadLen.toShort())
-        buffer.putShort(msgId.toShort())
-        buffer.put(0.toByte()) // Src
-        buffer.put(0.toByte()) // Dst
+        packet[0] = 0x42.toByte() // 'B'
+        packet[1] = 0x52.toByte() // 'R'
+        packet[2] = (payloadLen and 0xFF).toByte()
+        packet[3] = ((payloadLen shr 8) and 0xFF).toByte()
+        packet[4] = (msgId and 0xFF).toByte()
+        packet[5] = ((msgId shr 8) and 0xFF).toByte()
+        packet[6] = 0x00
+        packet[7] = 0x00
 
-        if (payloadLen > 0) {
-            buffer.put(payload)
-        }
+        System.arraycopy(payload, 0, packet, 8, payloadLen)
 
-        val raw = buffer.array()
-        var checksum = 0
+        var sum = 0
         for (i in 0 until (8 + payloadLen)) {
-            checksum += (raw[i].toInt() and 0xFF)
+            sum += (packet[i].toInt() and 0xFF)
         }
-        checksum = checksum and 0xFFFF
+        val crc = sum and 0xFFFF
 
-        buffer.putShort(checksum.toShort())
-        return buffer.array()
-    }
+        packet[totalLen - 2] = (crc and 0xFF).toByte()
+        packet[totalLen - 1] = ((crc shr 8) and 0xFF).toByte()
 
-    fun getContinuousStartPacket(): ByteArray {
-        val payload = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN)
-        payload.putShort(1212.toShort())
-        return createPacket(1003, payload.array())
+        return packet
     }
 
     fun getPollDistanceSimplePacket(): ByteArray {
-        val payload = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN)
-        payload.putShort(1212.toShort())
-        return createPacket(1, payload.array())
+        val payload = byteArrayOf(
+            (1212 and 0xFF).toByte(),
+            ((1212 shr 8) and 0xFF).toByte()
+        )
+        return createPacket(6, payload)
     }
 
-    private fun calculateChecksum(data: ByteArray, length: Int): Int {
-        var sum = 0
-        for (i in 0 until length) {
-            sum += (data[i].toInt() and 0xFF)
-        }
-        return sum and 0xFFFF
+    fun getContinuousStartPacket(): ByteArray {
+        val payload = byteArrayOf(
+            (1212 and 0xFF).toByte(),
+            ((1212 shr 8) and 0xFF).toByte()
+        )
+        return createPacket(1003, payload)
     }
 
     fun parseBuffer(buffer: MutableList<Byte>): Pair<Float, Int>? {
         while (buffer.size >= 10) {
-            // Cari header 'B' 'R'
+            // Cari awalan header 'B' 'R'
             if (buffer[0] != 0x42.toByte() || buffer[1] != 0x52.toByte()) {
                 buffer.removeAt(0)
                 continue
@@ -63,6 +62,13 @@ object PingProtocol {
             val payloadLength = (buffer[2].toInt() and 0xFF) or ((buffer[3].toInt() and 0xFF) shl 8)
             val fullPacketLength = 8 + payloadLength + 2
 
+            // Lindungi dari panjang payload anomali
+            if (payloadLength > 1024) {
+                buffer.removeAt(0)
+                continue
+            }
+
+            // Tunggu hingga paket utuh terkumpul di buffer
             if (buffer.size < fullPacketLength) {
                 return null
             }
@@ -72,49 +78,52 @@ object PingProtocol {
                 packet[i] = buffer[i]
             }
 
-            val expectedCrc = (packet[fullPacketLength - 2].toInt() and 0xFF) or
-                    ((packet[fullPacketLength - 1].toInt() and 0xFF) shl 8)
-            val calculatedCrc = calculateChecksum(packet, fullPacketLength - 2)
+            val msgId = (packet[4].toInt() and 0xFF) or ((packet[5].toInt() and 0xFF) shl 8)
+            lastDebugMsg = "ID:$msgId L:$payloadLength"
 
-            if (expectedCrc == calculatedCrc) {
-                val msgId = (packet[4].toInt() and 0xFF) or ((packet[5].toInt() and 0xFF) shl 8)
-                val payload = ByteBuffer.wrap(packet, 8, payloadLength).order(ByteOrder.LITTLE_ENDIAN)
+            val payload = ByteBuffer.wrap(packet, 8, payloadLength).order(ByteOrder.LITTLE_ENDIAN)
+            var result: Pair<Float, Int>? = null
 
-                var parsedResult: Pair<Float, Int>? = null
-
-                when (msgId) {
-                    1212 -> { // distance_simple
-                        if (payloadLength >= 5) {
-                            val distMm = payload.int
-                            val conf = payload.get().toInt() and 0xFF
-                            parsedResult = Pair(distMm.toFloat() / 1000.0f, conf)
-                        }
+            when (msgId) {
+                1212 -> { // distance_simple: distance (uint32 mm), confidence (uint8)
+                    if (payloadLength >= 5) {
+                        val distMm = payload.int
+                        val conf = payload.get().toInt() and 0xFF
+                        result = Pair(distMm.toFloat() / 1000.0f, conf)
                     }
-                    1211 -> { // distance
-                        if (payloadLength >= 10) {
-                            val distMm = payload.int
-                            val conf = payload.get().toInt() and 0xFF
-                            parsedResult = Pair(distMm.toFloat() / 1000.0f, conf)
-                        }
+                }
+                1211 -> { // distance: distance (uint32 mm), confidence (uint8)
+                    if (payloadLength >= 5) {
+                        val distMm = payload.int
+                        val conf = payload.get().toInt() and 0xFF
+                        result = Pair(distMm.toFloat() / 1000.0f, conf)
                     }
-                    1300 -> { // profile
-                        if (payloadLength >= 6) {
-                            val distMm = payload.int
-                            val conf = payload.short.toInt() and 0xFFFF
-                            parsedResult = Pair(distMm.toFloat() / 1000.0f, conf)
+                }
+                1300 -> { // profile: distance (uint32 mm), confidence (uint16)
+                    if (payloadLength >= 6) {
+                        val distMm = payload.int
+                        val conf = payload.short.toInt() and 0xFFFF
+                        result = Pair(distMm.toFloat() / 1000.0f, conf)
+                    }
+                }
+                else -> {
+                    // Coba baca uint32 pertama jika ukuran payload minimal 4 byte
+                    if (payloadLength >= 4) {
+                        val possibleDistMm = payload.int
+                        if (possibleDistMm in 100..100000) { // Rentang wajar: 10 cm - 100 m
+                            result = Pair(possibleDistMm.toFloat() / 1000.0f, 100)
                         }
                     }
                 }
+            }
 
-                for (i in 0 until fullPacketLength) {
-                    buffer.removeAt(0)
-                }
-
-                if (parsedResult != null) {
-                    return parsedResult
-                }
-            } else {
+            // Hapus paket yang selesai diproses dari buffer
+            for (i in 0 until fullPacketLength) {
                 buffer.removeAt(0)
+            }
+
+            if (result != null) {
+                return result
             }
         }
         return null
